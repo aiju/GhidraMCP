@@ -1,4 +1,4 @@
-name: Build with Maven
+name: Build with Gradle
 
 on:
   push:
@@ -10,17 +10,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      GHIDRA_VERSION: 11.3.2
-      GHIDRA_DATE: 20250415
-      GHIDRA_LIBS: >-
-        Features/Base/lib/Base.jar
-        Features/Decompiler/lib/Decompiler.jar
-        Framework/Docking/lib/Docking.jar
-        Framework/Generic/lib/Generic.jar
-        Framework/Project/lib/Project.jar
-        Framework/SoftwareModeling/lib/SoftwareModeling.jar
-        Framework/Utility/lib/Utility.jar
-        Framework/Gui/lib/Gui.jar
+      GHIDRA_VERSION: 12.0.3
+      GHIDRA_DATE: "20250210"
 
     steps:
     - uses: actions/checkout@v4
@@ -29,28 +20,24 @@ jobs:
       with:
         java-version: '21'
         distribution: 'temurin'
-        cache: maven
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
 
     - name: Download Ghidra
       run: |
         wget --no-verbose -O ghidra.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${{ env.GHIDRA_VERSION }}_build/ghidra_${{ env.GHIDRA_VERSION }}_PUBLIC_${{ env.GHIDRA_DATE }}.zip
         7z x -bd ghidra.zip
 
-    - name: Copy Ghidra libs
+    - name: Build with Gradle
       run: |
-        mkdir -p ./lib
-        for libfile in ${{ env.GHIDRA_LIBS }}
-          do echo "Copying ${libfile} to lib/"
-          cp ghidra_${{ env.GHIDRA_VERSION }}_PUBLIC/Ghidra/${libfile} ./lib/
-        done
-
-    - name: Build with Maven
-      run: mvn clean package assembly:single
+        export GHIDRA_INSTALL_DIR=$(pwd)/ghidra_${{ env.GHIDRA_VERSION }}_PUBLIC
+        gradle buildExtension
 
     - name: Assemble release directory
       run: |
         mkdir release
-        cp target/GhidraMCP-*-SNAPSHOT.zip release/
+        cp dist/*.zip release/
         cp bridge_mcp_ghidra.py release/
 
     - name: Upload artifact

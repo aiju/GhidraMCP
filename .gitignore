@@ -1,5 +1,7 @@
-# Maven target directory
-/target/
+# Gradle build output
+/build/
+/dist/
+.gradle/
 
 # Compiled class files
 *.class
@@ -35,20 +37,14 @@ bin/
 .Spotlight-V100
 .Trashes
 
-# Maven Wrapper
-.mvn/
-!/.mvn/wrapper/maven-wrapper.jar
-mvnw
-mvnw.cmd
-
 # Environment files
 .env
 .env.*
+gradle.properties
 
-# Java crash logs (if any)
+# Java crash logs
 hs_err_pid*
 replay_pid*
 
-# Third party JAR files from Ghidra
+# Third party JAR files
 lib/*.jar
-
