@@ -70,7 +70,7 @@ public class GhidraMCPPlugin extends Plugin {
     private HttpServer server;
     private static final String OPTION_CATEGORY_NAME = "GhidraMCP HTTP Server";
     private static final String PORT_OPTION_NAME = "Server Port";
-    private static final int DEFAULT_PORT = 8080;
+    private static final int DEFAULT_PORT = 9876;
 
     public GhidraMCPPlugin(PluginTool tool) {
         super(tool);
@@ -333,6 +333,59 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, getFunctionXrefs(name, offset, limit));
         });
 
+        server.createContext("/set_data_type", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String dataType = params.get("data_type");
+            boolean force = "true".equalsIgnoreCase(params.get("force"));
+            String result = setDataTypeAtAddress(address, dataType, force);
+            sendResponse(exchange, result);
+        });
+
+        server.createContext("/read_bytes", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            int length = parseIntOrDefault(qparams.get("length"), 256);
+            sendResponse(exchange, readBytesAtAddress(address, length));
+        });
+
+        server.createContext("/search_symbols", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String query = qparams.get("query");
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, searchSymbols(query, offset, limit));
+        });
+
+        server.createContext("/search_data_types", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String query = qparams.get("query");
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, searchDataTypes(query, offset, limit));
+        });
+
+        server.createContext("/get_data_type", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String name = qparams.get("name");
+            sendResponse(exchange, getDataTypeDetails(name));
+        });
+
+        server.createContext("/create_data_type", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String definition = params.get("definition");
+            boolean update = "true".equalsIgnoreCase(params.get("update"));
+            sendResponse(exchange, createDataTypeFromC(definition, update));
+        });
+
+        server.createContext("/rename_struct_field", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String structName = params.get("struct_name");
+            int fieldOffset = parseIntOrDefault(params.get("field_offset"), -1);
+            String newFieldName = params.get("new_field_name");
+            sendResponse(exchange, renameStructField(structName, fieldOffset, newFieldName));
+        });
+
         server.createContext("/strings", exchange -> {
             Map<String, String> qparams = parseQueryParams(exchange);
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
@@ -485,6 +538,32 @@ public class GhidraMCPPlugin extends Plugin {
         }
         return paginateList(matches, offset, limit);
     }    
+
+    private String searchSymbols(String searchTerm, int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (searchTerm == null || searchTerm.isEmpty()) return "Search term is required";
+
+        String lowerTerm = searchTerm.toLowerCase();
+        List<String> matches = new ArrayList<>();
+
+        for (Symbol symbol : program.getSymbolTable().getAllSymbols(true)) {
+            if (symbol.getName().toLowerCase().contains(lowerTerm)) {
+                String type = symbol.getSymbolType().toString();
+                Namespace ns = symbol.getParentNamespace();
+                String nsPrefix = (ns != null && !ns.isGlobal()) ? ns.getName() + "::" : "";
+                matches.add(String.format("%s%s @ %s [%s]",
+                    nsPrefix, symbol.getName(), symbol.getAddress(), type));
+            }
+        }
+
+        Collections.sort(matches);
+
+        if (matches.isEmpty()) {
+            return "No symbols matching '" + searchTerm + "'";
+        }
+        return paginateList(matches, offset, limit);
+    }
 
     // ----------------------------------------------------------------------------------
     // Logic for rename, decompile, etc.
@@ -897,6 +976,378 @@ public class GhidraMCPPlugin extends Plugin {
      */
     private boolean setDisassemblyComment(String addressStr, String comment) {
         return setCommentAtAddress(addressStr, comment, CodeUnit.EOL_COMMENT, "Set disassembly comment");
+    }
+
+    /**
+     * Set the data type at a given address (for global variables, etc.)
+     * If force is false and existing code units would be overwritten, returns a
+     * description of what's there instead. If force is true, clears them first.
+     */
+    private String setDataTypeAtAddress(String addressStr, String dataTypeName, boolean force) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+        if (dataTypeName == null || dataTypeName.isEmpty()) return "Data type is required";
+
+        final StringBuilder response = new StringBuilder();
+        final AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Set data type at address");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dataType = resolveDataType(dtm, dataTypeName);
+
+                    if (dataType == null) {
+                        response.append("Could not resolve data type: ").append(dataTypeName);
+                        return;
+                    }
+
+                    Listing listing = program.getListing();
+                    int length = dataType.getLength();
+                    Address endAddr = addr.add(length - 1);
+
+                    if (!force) {
+                        // Check for existing code units that would conflict
+                        String conflict = describeExistingCodeUnits(listing, addr, endAddr);
+                        if (conflict != null) {
+                            response.append("Conflict: ").append(conflict)
+                                    .append("\nRetry with force=true to overwrite.");
+                            return;
+                        }
+                    } else {
+                        listing.clearCodeUnits(addr, endAddr, false);
+                    }
+
+                    listing.createData(addr, dataType);
+
+                    response.append("Data type set to ").append(dataType.getDisplayName())
+                            .append(" at ").append(addressStr);
+                    success.set(true);
+                } catch (Exception e) {
+                    response.append("Error setting data type: ").append(e.getMessage());
+                    Msg.error(this, "Error setting data type at address", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            response.append("Failed to execute on Swing thread: ").append(e.getMessage());
+            Msg.error(this, "Failed to execute set data type on Swing thread", e);
+        }
+
+        return response.toString();
+    }
+
+    /**
+     * Read bytes at an address and return a hexdump (hex + ASCII).
+     */
+    private String readBytesAtAddress(String addressStr, int length) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+        if (length <= 0) length = 256;
+        if (length > 65536) length = 65536;
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            byte[] bytes = new byte[length];
+            int bytesRead = program.getMemory().getBytes(addr, bytes, 0, length);
+
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < bytesRead; i += 16) {
+                // Address column
+                sb.append(addr.add(i).toString());
+                sb.append("  ");
+
+                // Hex columns
+                int lineLen = Math.min(16, bytesRead - i);
+                for (int j = 0; j < 16; j++) {
+                    if (j == 8) sb.append(' ');
+                    if (j < lineLen) {
+                        sb.append(String.format("%02x ", bytes[i + j] & 0xFF));
+                    } else {
+                        sb.append("   ");
+                    }
+                }
+
+                sb.append(" |");
+
+                // ASCII column
+                for (int j = 0; j < lineLen; j++) {
+                    char c = (char) (bytes[i + j] & 0xFF);
+                    sb.append((c >= 32 && c < 127) ? c : '.');
+                }
+
+                sb.append("|\n");
+            }
+
+            return sb.toString();
+        } catch (Exception e) {
+            return "Error reading bytes: " + e.getMessage();
+        }
+    }
+
+    // ----------------------------------------------------------------------------------
+    // Data type query & manipulation
+    // ----------------------------------------------------------------------------------
+
+    /**
+     * Search data types by name substring.
+     */
+    private String searchDataTypes(String query, int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (query == null || query.isEmpty()) return "Search query is required";
+
+        String lowerQuery = query.toLowerCase();
+        List<String> matches = new ArrayList<>();
+        DataTypeManager dtm = program.getDataTypeManager();
+        Iterator<DataType> allTypes = dtm.getAllDataTypes();
+
+        while (allTypes.hasNext()) {
+            DataType dt = allTypes.next();
+            if (dt.getName().toLowerCase().contains(lowerQuery)) {
+                String kind = getDataTypeKind(dt);
+                matches.add(String.format("%s [%s] size=%d path=%s",
+                    dt.getName(), kind, dt.getLength(), dt.getPathName()));
+            }
+        }
+
+        Collections.sort(matches);
+
+        if (matches.isEmpty()) {
+            return "No data types matching '" + query + "'";
+        }
+        return paginateList(matches, offset, limit);
+    }
+
+    /**
+     * Get a human-readable kind string for a data type.
+     */
+    private String getDataTypeKind(DataType dt) {
+        if (dt instanceof ghidra.program.model.data.Structure) return "struct";
+        if (dt instanceof ghidra.program.model.data.Union) return "union";
+        if (dt instanceof ghidra.program.model.data.Enum) return "enum";
+        if (dt instanceof ghidra.program.model.data.TypeDef) return "typedef";
+        if (dt instanceof ghidra.program.model.data.Pointer) return "pointer";
+        if (dt instanceof ghidra.program.model.data.Array) return "array";
+        if (dt instanceof ghidra.program.model.data.FunctionDefinition) return "funcdef";
+        return "primitive";
+    }
+
+    /**
+     * Get full details of a named data type.
+     */
+    private String getDataTypeDetails(String name) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (name == null || name.isEmpty()) return "Data type name is required";
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        DataType dt = findDataTypeByNameInAllCategories(dtm, name);
+        if (dt == null) return "Data type not found: " + name;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("Name: %s\nKind: %s\nSize: %d\nPath: %s\n",
+            dt.getName(), getDataTypeKind(dt), dt.getLength(), dt.getPathName()));
+
+        if (dt instanceof ghidra.program.model.data.Structure) {
+            ghidra.program.model.data.Structure struct = (ghidra.program.model.data.Structure) dt;
+            sb.append(String.format("Alignment: %d\nNum fields: %d\n\nFields:\n",
+                struct.getAlignment(), struct.getNumComponents()));
+            for (ghidra.program.model.data.DataTypeComponent comp : struct.getComponents()) {
+                String fieldName = comp.getFieldName() != null ? comp.getFieldName() : "(unnamed)";
+                sb.append(String.format("  offset=0x%x size=%d type=%s name=%s\n",
+                    comp.getOffset(), comp.getLength(),
+                    comp.getDataType().getDisplayName(), fieldName));
+            }
+        } else if (dt instanceof ghidra.program.model.data.Union) {
+            ghidra.program.model.data.Union union = (ghidra.program.model.data.Union) dt;
+            sb.append(String.format("Num fields: %d\n\nFields:\n", union.getNumComponents()));
+            for (ghidra.program.model.data.DataTypeComponent comp : union.getComponents()) {
+                String fieldName = comp.getFieldName() != null ? comp.getFieldName() : "(unnamed)";
+                sb.append(String.format("  offset=0x%x size=%d type=%s name=%s\n",
+                    comp.getOffset(), comp.getLength(),
+                    comp.getDataType().getDisplayName(), fieldName));
+            }
+        } else if (dt instanceof ghidra.program.model.data.Enum) {
+            ghidra.program.model.data.Enum enumDt = (ghidra.program.model.data.Enum) dt;
+            sb.append("\nValues:\n");
+            for (String valueName : enumDt.getNames()) {
+                sb.append(String.format("  %s = 0x%x\n", valueName, enumDt.getValue(valueName)));
+            }
+        } else if (dt instanceof ghidra.program.model.data.TypeDef) {
+            ghidra.program.model.data.TypeDef td = (ghidra.program.model.data.TypeDef) dt;
+            sb.append("Underlying type: ").append(td.getBaseDataType().getDisplayName()).append("\n");
+        } else if (dt instanceof ghidra.program.model.data.Pointer) {
+            ghidra.program.model.data.Pointer ptr = (ghidra.program.model.data.Pointer) dt;
+            DataType pointee = ptr.getDataType();
+            sb.append("Points to: ").append(pointee != null ? pointee.getDisplayName() : "void").append("\n");
+        } else if (dt instanceof ghidra.program.model.data.Array) {
+            ghidra.program.model.data.Array arr = (ghidra.program.model.data.Array) dt;
+            sb.append(String.format("Element type: %s\nElement count: %d\n",
+                arr.getDataType().getDisplayName(), arr.getNumElements()));
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Create data types from a C definition string using Ghidra's CParser.
+     * If update is false, fails when a type with the same name already exists.
+     */
+    private String createDataTypeFromC(String definition, boolean update) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (definition == null || definition.isEmpty()) return "C definition is required";
+
+        final StringBuilder response = new StringBuilder();
+        final AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create data type from C");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    ghidra.app.util.cparser.C.CParser parser = new ghidra.app.util.cparser.C.CParser(dtm);
+                    parser.parse(definition);
+
+                    // Collect all parsed types from all maps
+                    List<DataType> parsedTypes = new ArrayList<>();
+                    parsedTypes.addAll(parser.getComposites().values());
+                    parsedTypes.addAll(parser.getEnums().values());
+                    parsedTypes.addAll(parser.getTypes().values());
+
+                    if (parsedTypes.isEmpty()) {
+                        response.append("No types were parsed from the definition");
+                        return;
+                    }
+
+                    // Check for conflicts if not updating
+                    if (!update) {
+                        List<String> conflicts = new ArrayList<>();
+                        for (DataType dt : parsedTypes) {
+                            DataType existing = findDataTypeByNameInAllCategories(dtm, dt.getName());
+                            if (existing != null) {
+                                conflicts.add(dt.getName() + " (exists at " + existing.getPathName() + ")");
+                            }
+                        }
+                        if (!conflicts.isEmpty()) {
+                            response.append("Conflict: the following types already exist:\n");
+                            for (String c : conflicts) {
+                                response.append("  ").append(c).append("\n");
+                            }
+                            response.append("Retry with update=true to replace them.");
+                            return;
+                        }
+                    }
+
+                    ghidra.program.model.data.DataTypeConflictHandler handler = update
+                        ? ghidra.program.model.data.DataTypeConflictHandler.REPLACE_HANDLER
+                        : ghidra.program.model.data.DataTypeConflictHandler.DEFAULT_HANDLER;
+
+                    List<String> created = new ArrayList<>();
+                    for (DataType dt : parsedTypes) {
+                        dtm.addDataType(dt, handler);
+                        created.add(dt.getName() + " [" + getDataTypeKind(dt) + "]");
+                    }
+
+                    response.append("Created types:\n");
+                    for (String name : created) {
+                        response.append("  ").append(name).append("\n");
+                    }
+                    success.set(true);
+                } catch (Exception e) {
+                    response.append("Error parsing C definition: ").append(e.getMessage());
+                    Msg.error(this, "Error parsing C definition", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            response.append("Failed to execute on Swing thread: ").append(e.getMessage());
+            Msg.error(this, "Failed to execute create data type on Swing thread", e);
+        }
+
+        return response.toString();
+    }
+
+    /**
+     * Rename a field in a struct by its byte offset.
+     */
+    private String renameStructField(String structName, int fieldOffset, String newFieldName) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (structName == null || structName.isEmpty()) return "Struct name is required";
+        if (fieldOffset < 0) return "Field offset is required";
+        if (newFieldName == null || newFieldName.isEmpty()) return "New field name is required";
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        DataType dt = findDataTypeByNameInAllCategories(dtm, structName);
+        if (dt == null) return "Data type not found: " + structName;
+        if (!(dt instanceof ghidra.program.model.data.Structure)) {
+            return structName + " is not a struct (it is " + getDataTypeKind(dt) + ")";
+        }
+
+        ghidra.program.model.data.Structure struct = (ghidra.program.model.data.Structure) dt;
+        ghidra.program.model.data.DataTypeComponent comp = struct.getComponentAt(fieldOffset);
+        if (comp == null) {
+            return "No field at offset 0x" + Integer.toHexString(fieldOffset) + " in " + structName;
+        }
+
+        final StringBuilder response = new StringBuilder();
+        final AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Rename struct field");
+                try {
+                    String oldName = comp.getFieldName() != null ? comp.getFieldName() : "(unnamed)";
+                    comp.setFieldName(newFieldName);
+                    response.append(String.format("Renamed field at offset 0x%x in %s: %s -> %s",
+                        fieldOffset, structName, oldName, newFieldName));
+                    success.set(true);
+                } catch (Exception e) {
+                    response.append("Error renaming field: ").append(e.getMessage());
+                    Msg.error(this, "Error renaming struct field", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (InterruptedException | InvocationTargetException e) {
+            response.append("Failed to execute on Swing thread: ").append(e.getMessage());
+            Msg.error(this, "Failed to execute rename struct field on Swing thread", e);
+        }
+
+        return response.toString();
+    }
+
+    /**
+     * Describe existing defined code units in a range, or null if only undefined bytes.
+     */
+    private String describeExistingCodeUnits(Listing listing, Address start, Address end) {
+        List<String> conflicts = new ArrayList<>();
+        CodeUnitIterator it = listing.getCodeUnits(start, true);
+        while (it.hasNext()) {
+            CodeUnit cu = it.next();
+            if (cu.getAddress().compareTo(end) > 0) break;
+
+            if (cu instanceof Instruction) {
+                Instruction instr = (Instruction) cu;
+                conflicts.add(String.format("instruction at %s: %s", cu.getAddress(), instr.toString()));
+            } else if (cu instanceof Data) {
+                Data data = (Data) cu;
+                if (!data.getDataType().getName().startsWith("undefined")) {
+                    String label = data.getLabel() != null ? data.getLabel() : "(unnamed)";
+                    conflicts.add(String.format("defined data at %s: %s %s",
+                        cu.getAddress(), data.getDataType().getDisplayName(), label));
+                }
+            }
+        }
+        return conflicts.isEmpty() ? null : String.join("; ", conflicts);
     }
 
     /**

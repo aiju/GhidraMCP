@@ -14,7 +14,7 @@ from urllib.parse import urljoin
 
 from mcp.server.fastmcp import FastMCP
 
-DEFAULT_GHIDRA_SERVER = "http://127.0.0.1:8080/"
+DEFAULT_GHIDRA_SERVER = "http://127.0.0.1:9876/"
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,99 @@ def search_functions_by_name(query: str, offset: int = 0, limit: int = 100) -> l
     return safe_get("searchFunctions", {"query": query, "offset": offset, "limit": limit})
 
 @mcp.tool()
+def search_symbols(query: str, offset: int = 0, limit: int = 100) -> list:
+    """
+    Search all symbols (functions, data labels, etc.) by substring match.
+
+    Returns symbol name, address, type, and namespace for each match.
+
+    Args:
+        query: Substring to search for (case-insensitive)
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results (default: 100)
+
+    Returns:
+        List of matching symbols with addresses and types
+    """
+    if not query:
+        return ["Error: query string is required"]
+    return safe_get("search_symbols", {"query": query, "offset": offset, "limit": limit})
+
+@mcp.tool()
+def search_data_types(query: str, offset: int = 0, limit: int = 100) -> list:
+    """
+    Search data types by name substring.
+
+    Args:
+        query: Substring to search for (case-insensitive)
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results (default: 100)
+
+    Returns:
+        List of matching data types with name, kind, size, and path
+    """
+    if not query:
+        return ["Error: query string is required"]
+    return safe_get("search_data_types", {"query": query, "offset": offset, "limit": limit})
+
+@mcp.tool()
+def get_data_type(name: str) -> str:
+    """
+    Get full details of a data type by name.
+
+    For structs/unions: lists all fields with offset, size, type, and name.
+    For enums: lists all values.
+    For typedefs: shows the underlying type.
+    For pointers/arrays: shows the element type.
+
+    Args:
+        name: Exact name of the data type
+
+    Returns:
+        Detailed description of the data type
+    """
+    return "\n".join(safe_get("get_data_type", {"name": name}))
+
+@mcp.tool()
+def create_data_type(definition: str, update: bool = False) -> str:
+    """
+    Create data types from a C definition string.
+
+    Parses structs, enums, and typedefs using Ghidra's C parser.
+
+    Args:
+        definition: C-style definition (e.g. "struct Foo { int x; char name[20]; };")
+        update: If True, replace existing types with the same name.
+                If False (default), fails when a type already exists.
+
+    Returns:
+        List of created type names, or error/conflict message
+    """
+    params = {"definition": definition}
+    if update:
+        params["update"] = "true"
+    return safe_post("create_data_type", params)
+
+@mcp.tool()
+def rename_struct_field(struct_name: str, field_offset: int, new_field_name: str) -> str:
+    """
+    Rename a field in a struct by its byte offset.
+
+    Args:
+        struct_name: Name of the struct
+        field_offset: Byte offset of the field within the struct
+        new_field_name: New name for the field
+
+    Returns:
+        Result message indicating success or failure
+    """
+    return safe_post("rename_struct_field", {
+        "struct_name": struct_name,
+        "field_offset": str(field_offset),
+        "new_field_name": new_field_name
+    })
+
+@mcp.tool()
 def rename_variable(function_name: str, old_name: str, new_name: str) -> str:
     """
     Rename a local variable within a function.
@@ -223,6 +316,44 @@ def set_local_variable_type(function_address: str, variable_name: str, new_type:
     Set a local variable's type.
     """
     return safe_post("set_local_variable_type", {"function_address": function_address, "variable_name": variable_name, "new_type": new_type})
+
+@mcp.tool()
+def read_bytes(address: str, length: int = 256) -> str:
+    """
+    Read raw bytes at an address and return a hexdump (hex + ASCII).
+
+    Args:
+        address: Start address in hex format (e.g. "0x00401000")
+        length: Number of bytes to read (default: 256, max: 65536)
+
+    Returns:
+        Hexdump output with address, hex bytes, and ASCII decode
+    """
+    return "\n".join(safe_get("read_bytes", {"address": address, "length": length}))
+
+@mcp.tool()
+def set_data_type(address: str, data_type: str, force: bool = False) -> str:
+    """
+    Set the data type at a given address (for global variables, etc.).
+
+    IMPORTANT: Always call with force=False first. If there is a conflict,
+    review the returned description of existing code units before deciding
+    whether to retry with force=True.
+
+    Args:
+        address: Address in hex format (e.g. "0x00401000")
+        data_type: The data type to apply (e.g. "int", "char[20]", "DWORD", a struct name, etc.)
+        force: If True, overwrite existing defined data/instructions at the address range.
+               Always try False first and inspect conflicts before forcing.
+
+    Returns:
+        Result message indicating success or failure, or a description of
+        conflicting code units if force is False and conflicts exist.
+    """
+    params = {"address": address, "data_type": data_type}
+    if force:
+        params["force"] = "true"
+    return safe_post("set_data_type", params)
 
 @mcp.tool()
 def get_xrefs_to(address: str, offset: int = 0, limit: int = 100) -> list:
