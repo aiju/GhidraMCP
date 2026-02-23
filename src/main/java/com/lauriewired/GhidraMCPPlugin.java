@@ -1188,18 +1188,54 @@ public class GhidraMCPPlugin extends Plugin {
             }
         } else if (dt instanceof ghidra.program.model.data.TypeDef) {
             ghidra.program.model.data.TypeDef td = (ghidra.program.model.data.TypeDef) dt;
-            sb.append("Underlying type: ").append(td.getBaseDataType().getDisplayName()).append("\n");
+            DataType base = td.getBaseDataType();
+            if (base instanceof ghidra.program.model.data.Pointer &&
+                ((ghidra.program.model.data.Pointer) base).getDataType() instanceof ghidra.program.model.data.FunctionDefinition) {
+                sb.append("Function pointer typedef: ");
+                appendFunctionDefinition(sb, (ghidra.program.model.data.FunctionDefinition)
+                    ((ghidra.program.model.data.Pointer) base).getDataType());
+                sb.append("\n");
+            } else {
+                sb.append("Underlying type: ").append(base.getDisplayName()).append("\n");
+            }
         } else if (dt instanceof ghidra.program.model.data.Pointer) {
             ghidra.program.model.data.Pointer ptr = (ghidra.program.model.data.Pointer) dt;
             DataType pointee = ptr.getDataType();
             sb.append("Points to: ").append(pointee != null ? pointee.getDisplayName() : "void").append("\n");
+            if (pointee instanceof ghidra.program.model.data.FunctionDefinition) {
+                sb.append("Function signature: ");
+                appendFunctionDefinition(sb, (ghidra.program.model.data.FunctionDefinition) pointee);
+                sb.append("\n");
+            }
         } else if (dt instanceof ghidra.program.model.data.Array) {
             ghidra.program.model.data.Array arr = (ghidra.program.model.data.Array) dt;
             sb.append(String.format("Element type: %s\nElement count: %d\n",
                 arr.getDataType().getDisplayName(), arr.getNumElements()));
+        } else if (dt instanceof ghidra.program.model.data.FunctionDefinition) {
+            sb.append("Function signature: ");
+            appendFunctionDefinition(sb, (ghidra.program.model.data.FunctionDefinition) dt);
+            sb.append("\n");
         }
 
         return sb.toString();
+    }
+
+    /**
+     * Append a human-readable function signature to a StringBuilder.
+     */
+    private void appendFunctionDefinition(StringBuilder sb, ghidra.program.model.data.FunctionDefinition funcDef) {
+        sb.append(funcDef.getReturnType().getDisplayName());
+        sb.append(" (*)(");
+        ghidra.program.model.data.ParameterDefinition[] params = funcDef.getArguments();
+        for (int i = 0; i < params.length; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(params[i].getDataType().getDisplayName());
+            String pname = params[i].getName();
+            if (pname != null && !pname.isEmpty()) {
+                sb.append(" ").append(pname);
+            }
+        }
+        sb.append(")");
     }
 
     /**
