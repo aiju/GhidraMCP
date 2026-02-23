@@ -1009,19 +1009,26 @@ public class GhidraMCPPlugin extends Plugin {
                     int length = dataType.getLength();
                     Address endAddr = addr.add(length - 1);
 
-                    if (!force) {
-                        // Check for existing code units that would conflict
-                        String conflict = describeExistingCodeUnits(listing, addr, endAddr);
-                        if (conflict != null) {
-                            response.append("Conflict: ").append(conflict)
-                                    .append("\nRetry with force=true to overwrite.");
+                    if (force) {
+                        listing.clearCodeUnits(addr, endAddr, false);
+                        listing.createData(addr, dataType);
+                    } else {
+                        try {
+                            listing.createData(addr, dataType);
+                        } catch (ghidra.program.model.util.CodeUnitInsertionException createEx) {
+                            // createData failed — describe what's in the way
+                            String conflict = describeExistingCodeUnits(listing, addr, endAddr);
+                            if (conflict != null) {
+                                response.append("Conflict at ").append(addressStr)
+                                        .append(": ").append(conflict)
+                                        .append("\nRetry with force=true to overwrite.");
+                            } else {
+                                response.append("Failed to create data at ").append(addressStr)
+                                        .append(": ").append(createEx.getMessage());
+                            }
                             return;
                         }
-                    } else {
-                        listing.clearCodeUnits(addr, endAddr, false);
                     }
-
-                    listing.createData(addr, dataType);
 
                     response.append("Data type set to ").append(dataType.getDisplayName())
                             .append(" at ").append(addressStr);
